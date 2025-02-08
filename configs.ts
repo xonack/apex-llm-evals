@@ -10,6 +10,8 @@ export const configs = {
             "4o-taylin": "ft:gpt-4o-2024-08-06:personal:4o-taylin:Af3ZTGkI",
             "4o-jens": "ft:gpt-4o-2024-08-06:personal:reply-4o-0:AClqrMiw",
             "4o": "gpt-4o",
+            "4o-mini": "gpt-4o-mini",
+            "o3-mini": "o3-mini",
         },
     },
     anthropic: {
