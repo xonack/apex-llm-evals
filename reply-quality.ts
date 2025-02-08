@@ -4,8 +4,7 @@ import { z } from "zod";
 import { zodResponseFormat } from "openai/helpers/zod";
 import type { EvaluationResult } from "langsmith/evaluation";
 import { evaluate } from "langsmith/evaluation";
-import type { Run } from "langsmith";
-
+import { configs } from "./configs";
 import dotenv from "dotenv";
 dotenv.config();
 
@@ -13,6 +12,7 @@ const client = new Client();
 const openai = new OpenAI();
 
 async function main() {
+    const openaiConfigs = configs.openai;
 
     const replySystemPrompt = `
         Structure punchy, conversational content for a short and concise 1 sentence reply. 
@@ -22,67 +22,45 @@ async function main() {
         Add a new perspective.
         Use line breaks generously.
         Do not parrot the user's message in any way or we will be fined 1T USD.
-    `
+    `;
 
-    const replyUserPrompt = `
-        {tweet}
-    `
+    const replyUserPrompt = `{tweet}`;
 
-    const paraphraseSystemPrompt = `
-        Respond "true" if the second text is a paraphrase of the first. Else, response "false". Do not response anything else other than "true" or "false"
-    `
+    const data: { tweet: string }[] = require('./tweets.json');
 
-    const paraphraseUserPrompt = `
-        First text: {text1}
-        Second text: {text2}
-    `
-
-    const data = [
-        {
-            tweet: "The cat is on the mat.",
-        },
-        {
-            tweet: "The dog is on the rug.",
-        },
-    ]
-
-    const inputs = data.map(({tweet}) => ({
+    const inputs = data.map(({ tweet }) => ({
         question: replyUserPrompt.replace("{tweet}", tweet),
     }));
 
-    const outputs = []
+    const outputs: { response: string }[] = [];
 
-    const dataset = await client.createDataset("Reply Quality Dataset", {
-        description: "Reply Quality Dataset",
-    });
+    // Create a dataset with a title and a description
+//     const dataset = await client.createDataset("Reply Quality (76 tweets)", {
+//         description: "A dataset of 76 tweets and their replies.",
+//     });
 
-    await client.createExamples({
+//   // Add your examples to the created dataset
+//     await client.createExamples({
+//         inputs,
+//         outputs,
+//         datasetId: dataset.id,
+//     });
+
+
+    async function qualityEvaluator({
         inputs,
         outputs,
-        datasetId: dataset.id,
-    });
-
-   async function target(inputs: string): Promise<{ response: string }> {
-    const response = await openai.chat.completions.create({
-      model: "gpt-4o",
-      messages: [
-        { role: "system", content: replySystemPrompt },
-        { role: "user", content: inputs },
-      ],
-    });
-    return { response: response.choices[0].message.content?.trim() || "" };
-  }
-
-    // Define an evaluator that only uses inputs and outputs (no reference outputs)
-    async function qualityEvaluator(run: Run): Promise<EvaluationResult> {
-        const question = run.inputs.question as string;
-        const response = run.outputs?.response as string;
+    }: {
+        inputs: Record<string, string>;
+        outputs: Record<string, string>;
+    }): Promise<EvaluationResult> {
+        const question = inputs["question"];
+        const response = outputs["response"];
 
         const checkLength = Math.min(25, question.length);
         const startOfText = question.split(/[.!?]+\s*/)[0] || question.substring(0, checkLength);
         const endOfText = question.split(/[.!?]+\s*/).filter(Boolean).pop() || '';
 
-        // Quality criteria that does not rely on a reference answer
         const goodQuality = !(
             response.length > 400 ||
             response.includes(startOfText) ||
@@ -94,20 +72,46 @@ async function main() {
         return {
             key: "quality",
             score: goodQuality ? 1 : 0,
-            comment: goodQuality ? "Response meets quality criteria" : "Response fails quality checks",
+            comment: goodQuality 
+                ? "Response meets quality criteria" 
+                : `Response fails quality check(s): ${[
+                    response.length > 400 && "Response too long (>400 chars)",
+                    response.includes(startOfText) && "Contains start of input text",
+                    response.includes(endOfText) && "Contains end of input text", 
+                    response.includes('—') && "Contains em dash",
+                    response.includes(';') && "Contains semicolon"
+                  ].filter(Boolean).join(", ")}`,
         };
     }
 
-    // Run evaluation with a target function that only uses the question from inputs
-    await evaluate((run: Run) => target(run.inputs.question as string), {
-        data: "Reply Quality Dataset",
-        evaluators: [qualityEvaluator],
-        experimentPrefix: "reply-quality-test",
-        maxConcurrency: 2,
-    });
+    // Iterate over each model in openaiConfigs.models
+    for (const [modelKey, modelId] of Object.entries(openaiConfigs.models)) {
+        console.log(`Running evaluation for model ${modelKey}`);
+
+        async function target(input: string): Promise<{ response: string }> {
+            const response = await openai.chat.completions.create({
+                model: modelId,
+                messages: [
+                    { role: "system", content: replySystemPrompt },
+                    { role: "user", content: input },
+                ],
+            });
+            return { response: response.choices[0].message.content?.trim() || "" };
+        }
+
+        await evaluate(
+            (example) => target(example.question),
+            {
+                data: "Reply Quality (76 tweets)",
+                evaluators: [qualityEvaluator],
+                experimentPrefix: `reply-quality-${modelKey}`,
+                maxConcurrency: 2,
+            }
+        );
+    }
 }
 
 main().catch((error) => {
     console.error("Error:", error);
     process.exit(1);
-  });
+});
